@@ -3,7 +3,9 @@ from PIL import Image
 from torchvision import transforms
 import os
 import numpy as np
+import glob
 from torch.autograd import Variable
+
 _mean = [0.5, 0.5, 0.5]
 _std = [0.5, 0.5, 0.5]
 
@@ -11,9 +13,11 @@ _std = [0.5, 0.5, 0.5]
 def _default_loader(path):
     return Image.open(path).convert('RGB')
 
+
 def read_img(path):
     img = _default_loader(path)
     return img
+
 
 data_transform = transforms.Compose(
     [transforms.ToTensor(),
@@ -35,15 +39,15 @@ def tensor_to_numpyuint8(ts):
     return np.clip(imgs * 255, 0, 255).astype("uint8")
 
 
-
-
 def get_plugin_name(dir):
     plugins = []
     for d in os.listdir(dir):
-        plugins.append(d)
+        if not (".py" in d or "__" in d):
+            plugins.append(d)
     return plugins
 
-def get_net_and_preprocess(plugin):
+
+def load_plugin(plugin_name, params):
     """
 
     :param plugin:  str
@@ -51,28 +55,19 @@ def get_net_and_preprocess(plugin):
     :rtype: nn.Module
     """
     import torch
-    net_path = "plugin.{}.net".format(plugin)
-    weight_path = os.path.join("plugin", plugin, "G.pth")
-    plug = __import__(net_path, fromlist=(plugin, "net"))
-    generate = plug.GNet()
-    generate.load_state_dict(torch.load(weight_path))
-    pipeline = plug.Preprocess()
-    return generate,pipeline
+    net_path = "plugin.{}.net".format(plugin_name)
+    weight_path = os.path.join("plugin", plugin_name, "G.pth")
+    plug = __import__(net_path, fromlist=(plugin_name, "net"))
+    transformer = plug.Transfromer(params)
+    generator = transformer.get_generator()
 
-def predict_save(generate, path, savepath, max_size=1280, use_gpu=False, preprocess=None,combine=False):
-    generate.eval()
-    img = read_img(path)
-    origin_img = img.copy()
-    a, b = img.size
-    origin_max = max([a,b])
-    print("input size:", (a, b))
-    if preprocess is not None:
-        img = preprocess(img)
-    max_ = max(img.size)
-    max_ = max_size if max_ > max_size else max_
-    is_big = (origin_max > max_size ) or (max_ > max_size)
+    generator.load_state_dict(torch.load(weight_path, map_location=lambda storage, loc: storage))
+    preprocess = transformer.get_preprocess()
+    postprocess = transformer.get_postprocess()
+    return generator, preprocess, postprocess
 
-    img = img.resize((max_, max_))
+
+def _forward(img, use_gpu, generate):
     img = data_transform(img)
     c, h, w = img.size()
     img = img.view(1, c, h, w)
@@ -83,21 +78,94 @@ def predict_save(generate, path, savepath, max_size=1280, use_gpu=False, preproc
     fake_img = tensor_to_numpyuint8(fake_img)
     new_img = fake_img[0]
     img = Image.fromarray(new_img)
-    if is_big:
-        na = a
-        nb = b
-    else:
-        na,nb =img.size
-        if na > nb:
-            nb = int(nb * (b/a))
-        else:
-            na = int(na * (a/b))
-    print("output size:",(na,nb))
+    return img
+
+
+def _load_img(path, preprocess):
+    img = read_img(path)
+    origin_img = img.copy()
+    a, b = img.size
+    print("[INFO]Input size:", (a, b))
+    if preprocess is not None:
+        img = preprocess(img)
+    print("[INFO]After proproces size:", img.size)
+    return img, origin_img
+
+
+def _save_img(img, origin_img, savepath, combine, postprocess):
+    if postprocess is not None:
+        img = postprocess(img)
+    na, nb = img.size
+    print("[INFO]After postproces size:", (na, nb))
     if combine:
-        origin_img = origin_img.resize((na, nb))
-        img = img.resize((na, nb))
-        img = np.concatenate((origin_img,img),axis=1)
+        origin_img = origin_img.resize((na, nb), Image.BICUBIC)
+        img = img.resize((na, nb), Image.BICUBIC)
+        b = np.array(img).astype("float32")
+        a = np.array(origin_img).astype("float32")
+        r = b - a
+        r *= 0.5
+        r += 127.5
+        r = r.astype("uint8")
+        img = np.concatenate((origin_img, img, r), axis=1)
         Image.fromarray(img).save(savepath)
     else:
-        img = img.resize((na, nb))
+        img = img.resize((na, nb), Image.BICUBIC)
         img.save(savepath)
+
+
+def predict_save(generate, path, savepath, split_size=np.inf, use_gpu=False,
+                 preprocess=None, combine=False, postprocess=None):
+    # img,origin_img = _load_img(path,preprocess)
+    # img = _forward(img,use_gpu,generate)
+    # print("Output size:", img.size)
+    # _save_img(img,origin_img,savepath,combine,postprocess)
+    _predict_spilt(generate, path, split_size, savepath, use_gpu, preprocess, combine, postprocess)
+
+
+def predict_dir(generate, path, savepath, split_size=np.inf, use_gpu=False,
+                preprocess=None, combine=False, postprocess=None):
+    img_dir = list(glob.glob(path + "*.jpg")) + list(glob.glob(path + "*.png"))
+    length = len(img_dir)
+    for i in range(length):
+        print("[INFO][{}/{}]".format(i, length))
+        out_path = img_dir[i].replace(path, savepath)
+        predict_save(generate, img_dir[i], out_path, split_size, use_gpu, preprocess, combine, postprocess)
+
+
+def _predict_spilt(generate, path, split_size, savepath, use_gpu=False,
+                   preprocess=None, combine=False, postprocess=None):
+    # if max()
+    img, origin_img = _load_img(path, preprocess)
+    oa,ob = img.size
+    if max(img.size) <= split_size:
+        img = _forward(img, use_gpu, generate)
+    else:
+        img_buffer = []
+        img_h, img_w = img.size
+        # 确保可以整除
+        img_h = img_h - img_h % split_size
+        img_w = img_w - img_w % split_size
+        img = img.resize((img_h, img_w))
+        # 先完成列 后完成行
+        for i in range(0, img_h, split_size):
+            buff_ = []
+            for j in range(0, img_w, split_size):
+                print("[INFO]Split ({},{})/({},{})".format(i+split_size,
+                                                           j+split_size,
+                                                          img_h, img_w))
+                crop = [i, j, i + split_size, j + split_size]
+                img_crop = img.crop(crop)
+                img_crop = _forward(img_crop, use_gpu, generate)
+                buff_.append(img_crop)
+            buff_ = np.concatenate(buff_, axis=0)
+            img_buffer.append(buff_)
+        img = np.concatenate(img_buffer, axis=1)
+        img = Image.fromarray(img).resize((oa,ob),Image.BICUBIC)
+    print("[INFO]Output size:", img.size)
+    _save_img(img, origin_img, savepath, combine, postprocess)
+
+
+def str2dict(s,eq="="):
+    if s is None:
+        return {}
+    return dict([elem.split(eq) for elem in s])
