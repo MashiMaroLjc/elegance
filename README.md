@@ -23,11 +23,10 @@ elegance 是一个专门针对手机摄影手残党开发的一款深度学习�
 - **0.2.0**
 
 - Update：
-
-              1. 原去除motion blur的插件deblur改成了deblur
-              2. 完善了插件的机制，改变了命令行参数格式，现可为插件定制和传递参数，格式如```python elegence plguin_name input_img -p key1=value1 key2=value2   ...```
-              3. 去除了facesr，facesr4，sr，sr4等插件，增加enhance插件
-              4. 增加了目录内多张图片处理。
+ 1. 原去除motion blur的插件deblur改成了deblur
+ 2. 完善了插件的机制，改变了命令行参数格式，现可为插件定制和传递参数，格式如```python elegence plguin_name input_img -p key1=value1 key2=value2   ...```
+ 3. 去除了facesr，facesr4，sr，sr4等插件，增加enhance插件
+ 4. 增加了目录内多张图片处理。
 
 - *注意：目前版本插件接口等和 0.1.0版本不兼容*
 
